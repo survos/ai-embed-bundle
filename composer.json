@@ -27,7 +27,8 @@
         "phpunit/phpunit": "^13.0",
         "symfony/framework-bundle": "^8.1",
         "survos/ai-duckdb-store": "^2.45",
-        "symfony/process": "^8.1"
+        "symfony/process": "^8.1",
+        "league/flysystem-aws-s3-v3": "^3.29"
     },
     "autoload": {
         "psr-4": {
@@ -41,6 +42,7 @@
     },
     "suggest": {
         "survos/workflow-messenger-bundle": "Entity-independent queued and batched requests (planned integration).",
-        "survos/ai-duckdb-store": "Required when using the DuckDB cache backend (also requires native ext-pdo_duckdb)."
+        "survos/ai-duckdb-store": "Required when using the DuckDB cache backend (also requires native ext-pdo_duckdb).",
+        "league/flysystem-aws-s3-v3": "Optional S3 snapshot storage; reuse an existing Flysystem service via remote_storage instead if available."
     }
 }

@@ -30,13 +30,7 @@ final class DuckDbEmbeddingCache
         if (!class_exists(\PDO::class) || !in_array('duckdb', \PDO::getAvailableDrivers(), true)) {
             throw new \LogicException('DuckDB embedding cache requires the native PDO DuckDB driver (ext-pdo_duckdb). Enable it in this PHP runtime before using the cache.');
         }
-        if (!is_dir(dirname($this->path))) {
-            mkdir(dirname($this->path), 0770, true);
-        }
-        $this->lock = fopen($this->path.'.lock', 'c');
-        if (!flock($this->lock, LOCK_EX | LOCK_NB)) {
-            throw new \RuntimeException('Embedding cache is in use; retry after the current importer/consumer finishes.');
-        }
+        $this->acquireLock();
         $this->db = new \PDO('duckdb:'.$this->path, options: [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
         $this->db->exec('CREATE TABLE IF NOT EXISTS profiles (id VARCHAR PRIMARY KEY, profile JSON NOT NULL);
             CREATE TABLE IF NOT EXISTS requests (id VARCHAR PRIMARY KEY, profile_id VARCHAR NOT NULL, input VARCHAR NOT NULL, status VARCHAR NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, error VARCHAR);
@@ -49,6 +43,58 @@ final class DuckDbEmbeddingCache
             CREATE TABLE IF NOT EXISTS embedding_batch_requests (batch_id VARCHAR NOT NULL, request_id VARCHAR NOT NULL, PRIMARY KEY (batch_id, request_id))");
 
         return $this->db;
+    }
+
+    private function acquireLock(): void
+    {
+        if (is_resource($this->lock)) {
+            return;
+        }
+        if (!is_dir(dirname($this->path)) && !mkdir(dirname($this->path), 0770, true) && !is_dir(dirname($this->path))) {
+            throw new \RuntimeException('Cannot create embedding directory.');
+        }
+        $lock = fopen($this->path.'.lock', 'c');
+        if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+            if (is_resource($lock)) {
+                fclose($lock);
+            }
+            throw new \RuntimeException('Embedding cache is in use; retry after the current importer/consumer finishes.');
+        }
+        $this->lock = $lock;
+    }
+
+    public function isOpen(): bool
+    {
+        return null !== $this->db;
+    }
+
+    /** Protect file installation without opening/creating the database itself. */
+    public function withFileLock(callable $operation): mixed
+    {
+        $owned = !is_resource($this->lock);
+        $this->acquireLock();
+        try {
+            return $operation();
+        } finally {
+            if ($owned && !$this->db) {
+                fclose($this->lock);
+                $this->lock = null;
+            }
+        }
+    }
+
+    /** Caller must release any retained PDO/store references before closing. */
+    public function close(): void
+    {
+        if ($this->db?->inTransaction()) {
+            throw new \LogicException('Cannot close a cache inside a transaction.');
+        }
+        $this->db?->exec('CHECKPOINT');
+        $this->db = null;
+        if (is_resource($this->lock)) {
+            fclose($this->lock);
+        }
+        $this->lock = null;
     }
 
     public function execute(string $sql, array $args = []): \PDOStatement

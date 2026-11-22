@@ -7,7 +7,7 @@ composer require survos/ai-embed-bundle
 php /path/to/mono/link /path/to/app
 ```
 
-PHP 8.5+ and the Composer dependencies are required. The DuckDB backend additionally needs the optional `survos/ai-duckdb-store` package and native PDO DuckDB extension. The bundle is disabled by default. Enabling services does not open a database or call a provider until used.
+PHP 8.5+ and the Composer dependencies are required. The DuckDB backend additionally needs the optional `survos/ai-duckdb-store` package and native PDO DuckDB extension. Generation is disabled by default. Snapshot commands remain available, but do not open a database or contact storage until used.
 
 ## Local configuration
 
@@ -48,7 +48,7 @@ php bin/console ai:embed:export var/embeddings/preserved.jsonl.gz
 
 The consumer is a bounded queue drain, suitable for a scheduled worker. This first slice uses the durable DuckDB requests table rather than Messenger. It resumes pending/failed work after restart, validates the entire batch before writing, and records attempted provider invocations before network access. Failed requests retry on the next invocation. A crash after generation but before commit may repeat generation; exactly-once external calls are not promised.
 
-Export uses jsonl-bundle's gzip writer and includes profile, exact input, request ID and vector. It makes no provider calls and refuses to overwrite archives. Document/chunk mapping remains in DuckDB; this vector export alone is not a complete document archive. Copy the closed DuckDB file for full restoration. Archive import is not yet implemented.
+Export uses jsonl-bundle's gzip writer and includes profile, exact input, request ID and vector. It makes no provider calls and refuses to overwrite archives. Document/chunk mapping remains in DuckDB; this vector export alone is not a complete document archive. Copy the closed DuckDB file for full restoration. JSONL archive import is not yet implemented; the snapshot commands below support DuckDB exchange.
 
 ## Cache identity and tables
 
@@ -116,3 +116,73 @@ DuckDB is optional at installation: `survos/ai-duckdb-store` is a Composer sugge
 OpenAI documents a 24-hour batch completion window. Bill's verified 25-request fixture completed in 133 seconds, but that is an observation, not a latency guarantee. Query vectors should eventually use a foreground cache-first path with the same model/dimensions rather than waiting on a provider batch.
 
 References: [OpenAI Batch API](https://developers.openai.com/api/docs/guides/batch), [embedding model](https://developers.openai.com/api/docs/models/text-embedding-3-small).
+
+## Durable S3 snapshots: push, pull, merge
+
+`EmbeddingStorageService` exposes three console commands through method-level `#[AsCommand]` attributes:
+
+```sh
+php bin/console embed:push survos-sites/packages
+php bin/console embed:pull survos-sites/packages
+php bin/console embed:merge survos-sites/packages
+# Pin a historical publication rather than the latest pointer:
+php bin/console embed:pull survos-sites/packages --snapshot=<sha256>
+```
+
+These commands are available even when `enabled: false` disables embedding generation. They never call a model. The local working file remains `cache_path`; it must be on persistent storage in production. S3 stores closed, checksummed snapshots for backup and exchange, not the live writable database.
+
+**Shared Survos location (created 2026-11-22):**
+
+- Bucket: **`survos-embeddings`**
+- Region: **`fsn1`** (Hetzner Falkenstein)
+- S3 endpoint: **`https://fsn1.your-objectstorage.com`**
+- Packages namespace: **`s3://survos-embeddings/survos-sites/packages/`**
+
+These names are public configuration; bucket objects are private. Credentials are secrets and belong in `.env.local`, environment variables or the deployment secret store. The bundle has no hard-coded bucket or credentials. The commands do not create buckets.
+
+Install the optional adapter in apps that use S3:
+
+```sh
+composer require league/flysystem-aws-s3-v3
+```
+
+```yaml
+survos_ai_embed:
+    cache_path: '%kernel.project_dir%/var/embeddings/packages.duckdb'
+    s3:
+        bucket: survos-embeddings
+        region: fsn1
+        endpoint: https://fsn1.your-objectstorage.com
+        access_key: '%env(EMBEDDINGS_S3_ACCESS_KEY)%'
+        secret_key: '%env(EMBEDDINGS_S3_SECRET_KEY)%'
+        path_style: true
+        # prefix: embeddings  # optional, relative to bucket root
+```
+
+The adapter uses the same Flysystem AWS S3 implementation as storage-bundle and folio storage. You can instead reuse an existing storage-bundle/Flysystem service, including a local filesystem for offline exchange/testing:
+
+```yaml
+survos_ai_embed:
+    remote_storage: embeddings.storage
+```
+
+`remote_storage` takes precedence over `s3`. Without either configuration the commands fail with an actionable error; container boot and unrelated embedding operations do not contact S3. On AWS, omitting both explicit credential fields uses the SDK credential chain; optional `session_token` is supported.
+
+### Publication layout and behavior
+
+```text
+survos-sites/packages/
+  snapshots/<sha256>.duckdb
+  snapshots/<sha256>.json
+  latest.json
+```
+
+A namespace identifies the producing application/repository, not a model. Each snapshot may hold multiple isolated model profiles. Manifests contain schema version, namespace, byte size, SHA-256, profile IDs, completed-vector/document counts, and publication time. Document references and exact source/input text remain inside the database. The latest pointer is written only after the data and historical manifest succeed. Concurrent publishers are last-writer-wins for that pointer; serialize publishers or merge the latest publication first. Prior content-addressed snapshots remain available. There is no automatic retention/deletion policy.
+
+- **Push** holds the cooperating local cache lock and builds a separate database containing ready vectors and only complete document/chunk mappings. It excludes pending/failed requests, provider-call history, batch ownership and raw provider response archives. Profiles, exact inputs, source text, tokenizer/chunker metadata and vectors are preserved. The original working database is not replaced. Empty publications are refused.
+- **Pull** streams to a temporary file, verifies checksum/size and validates model/input/document identities and vector dimensions before atomic installation. It only installs into an absent local database or returns a no-op for an identical file. Divergent files, an open connection, a WAL, or an active file lock are rejected. There is no force-overwrite flag.
+- **Merge** downloads/verifies the same immutable snapshot, then transactionally imports completed vectors and mappings through the existing cache. Matching request IDs/vectors are reused; a conflicting vector for the same exact input/profile aborts and rolls back. Pending local requests may become ready from imported results, but requests in locally owned unreconciled batches are refused. Local-only vectors, pending work and provider audit history remain intact.
+
+Merge currently stages the snapshot locally; it does **not** issue remote DuckDB queries against S3. This avoids transferring credentials into SQL and lets the full file checksum be verified before import. Working databases and pending-job backups should be retained separately: published snapshots intentionally cannot resume another machine's queue.
+
+Packages verified a real upload → fresh pull → zero-call fixture reload on 2026-11-22: 156 vectors from seven files, with identical projections and no model calls. An idempotent merge reused all 156. Bundle tests additionally cover multiple profiles, incomplete documents, corrupt downloads, namespace validation, merge rollback, active batch ownership, and file locking.

@@ -23,6 +23,17 @@ final class SurvosAiEmbedBundle extends AbstractSurvosBundle
     {
         $definition->rootNode()->children()
             ->booleanNode('enabled')->defaultFalse()->end()
+            ->scalarNode('remote_storage')->defaultNull()->end()
+            ->arrayNode('s3')->addDefaultsIfNotSet()->children()
+                ->scalarNode('bucket')->defaultValue('')->end()
+                ->scalarNode('region')->defaultValue('us-east-1')->end()
+                ->scalarNode('endpoint')->defaultValue('')->end()
+                ->scalarNode('prefix')->defaultValue('')->end()
+                ->scalarNode('access_key')->defaultValue('')->end()
+                ->scalarNode('secret_key')->defaultValue('')->end()
+                ->scalarNode('session_token')->defaultValue('')->end()
+                ->booleanNode('path_style')->defaultTrue()->end()
+            ->end()->end()
             ->scalarNode('cache_path')->defaultValue('%kernel.project_dir%/var/embeddings/cache.duckdb')->end()
             ->scalarNode('provider')->defaultValue('ollama')->end()
             ->scalarNode('document_prefix')->defaultValue('search_document: ')->end()
@@ -38,13 +49,19 @@ final class SurvosAiEmbedBundle extends AbstractSurvosBundle
     public function loadExtension(array $config, ContainerConfigurator $container, ContainerBuilder $builder): void
     {
         parent::loadExtension($config, $container, $builder);
+        $services = $container->services()->defaults()->autowire()->autoconfigure();
+        $services->set(DuckDbEmbeddingCache::class)->args([$config['cache_path']]);
+        $services->set(EmbeddingSnapshot::class);
+        $storage = $services->set(EmbeddingStorageService::class)->arg('$s3', $config['s3'])->arg('$remote', null);
+        if ($config['remote_storage']) {
+            $storage->arg('$remote', service($config['remote_storage']));
+        }
         if (!$config['enabled']) {
             return;
         }
         $services = $container->services()->defaults()->autowire()->autoconfigure();
         $services->set('ai_embed.http', HttpClientInterface::class)->factory([HttpClient::class, 'create']);
         $services->set(EmbeddingProfile::class)->args([$config['model'], $config['revision'], $config['dimensions'], $config['document_prefix'], $config['query_prefix'], $config['provider']]);
-        $services->set(DuckDbEmbeddingCache::class)->args([$config['cache_path']]);
         $services->set(OllamaEmbeddingProvider::class)->args([service('ai_embed.http'), $config['url']]);
         $services->alias(EmbeddingProviderInterface::class, OllamaEmbeddingProvider::class);
         $services->set(EmbeddingService::class);
