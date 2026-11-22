@@ -1,48 +1,78 @@
 # Survos AI Embed Bundle
 
-Shared home for model-aware embedding requests and reusable vector caches.
-
-**Initial scaffold:** this release registers a Symfony bundle and boots without a database, model server, or API credentials. Embedding generation, cache backends, document chunking, and queue handling are not implemented yet. Installing it does not create files, alter the application schema, or send model requests.
+Model-aware embedding requests and an app-local DuckDB cache, independent of application entities and databases. The first working provider is local Ollama/Nomic. Remote OpenAI batching is the next slice; selecting an OpenAI model does not yet enable a remote provider.
 
 ```bash
 composer require survos/ai-embed-bundle
-```
-
-Symfony Flex registers `Survos\AiEmbedBundle\SurvosAiEmbedBundle`. The bundle requires kit-bundle and uses its registration conventions. PHP 8.4+ and Symfony 8.1+ are required (transitive dependencies may impose a higher PHP minimum).
-
-## Planned API and boundaries
-
-- `ensureEmbedding(text, profile)`: an idempotent request keyed by the embedding profile and exact input hash; return a durable reference/status, with a vector when complete.
-- A batch equivalent reuses cached results and groups only missing work by compatible profile.
-- `ensureDocumentEmbedding(document, profile, chunkingOptions)`: a separate document layer that records immutable text, paragraph-aware chunks, offsets, and embedding links. No overlap initially.
-- Profiles retain model/revision, dimensions, document/query prefixes, and normalization. Changing model space creates new results, never overwrites incompatible vectors.
-- Completion validates and persists vectors through one idempotent result-writing path, whether execution was synchronous, queued locally, or a remote provider batch.
-- No dependency on bill, newspaper, museum, or application Doctrine entity classes.
-
-## Storage and integrations to build
-
-Use an app-local store, independent of the application's database. Reuse `survos/jsonl-bundle` for `.jsonl.gz` archives and lookup sidecars, `survos/ai-duckdb-store` for DuckDB vector storage/search, and existing workflow/Messenger contracts for optional background execution. A PostgreSQL adapter may come later; it is not required.
-
-Keep preserved embeddings distinct from disposable search indexes. Import/export must never call an embedding provider. Document text should be stored once, with explicit Unicode offsets and recorded input transformations. Preserve existing archives while testing new representations.
-
-Bookworm is the initial fixture application (Virginia bills and existing OpenAI/Nomic vectors). KPA, bench, Bill/rsun, and folio consumers can install the same package; app-specific importers remain outside it. Folio integration should bind a vector companion to an immutable source build. Bench can test archive round-trips, cache identity, profile isolation, retrieval, and storage sizes.
-
-## Development
-
-Persistent changes belong in `survos/mono`, under `bu/ai-embed-bundle`. After installing a published package in an app, use the existing mono linker:
-
-```bash
 php /path/to/mono/link /path/to/app
 ```
 
-Do not add Composer path/VCS overrides or edit a copied vendor package. This initial bundle does not yet replace Bookworm's experimental embedding implementation.
+PHP 8.5+, native PDO DuckDB and the Composer dependencies are required. The bundle is disabled by default. Enabling services does not open a database or call a provider until used.
 
-## Tests
+## Local configuration
 
-With this package's development dependencies installed:
+```yaml
+survos_ai_embed:
+    enabled: true
+    model: '%env(AI_EMBED_MODEL)%'
+    revision: '%env(AI_EMBED_REVISION)%'
+    url: '%env(AI_EMBED_URL)%'
+    cache_path: '%env(resolve:AI_EMBED_CACHE)%'
+```
+
+```dotenv
+AI_EMBED_MODEL=nomic-embed-text:v1.5
+AI_EMBED_REVISION=0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f
+AI_EMBED_URL=http://localhost:11434
+AI_EMBED_CACHE=%kernel.project_dir%/var/embeddings/cache.duckdb
+```
+
+Pin the installed model digest, not merely a mutable tag. The consumer checks `/api/tags` before each batch and rejects a mismatched revision. Requests use `truncate: false` so oversized inputs cannot silently lose text.
+
+## API and lifecycle
+
+Inject `Survos\AiEmbedBundle\EmbeddingService`:
+
+```php
+$request = $embeddings->ensureEmbedding($text);
+$query = $embeddings->ensureEmbedding($phrase, 'query');
+$document = $embeddings->ensureDocumentEmbedding($stableReference, $title, $text, maxTokens: 1800);
+```
+
+Ensure methods never call the provider. They create idempotent requests or return cached results. Individual requests include their vector when ready. Document handles contain `documentId`, `status`, `chunks`, `cacheHits`, and `pending`. Identical documents skip tokenization too. `documentChunks()` exposes ordered offsets/request IDs; the cache's `vector()` returns completed vectors.
+
+```bash
+php bin/console ai:embed:consume --batch-size=8 --limit=1000
+php bin/console ai:embed:export var/embeddings/preserved.jsonl.gz
+```
+
+The consumer is a bounded queue drain, suitable for a scheduled worker. This first slice uses the durable DuckDB requests table rather than Messenger. It resumes pending/failed work after restart, validates the entire batch before writing, and records attempted provider invocations before network access. Failed requests retry on the next invocation. A crash after generation but before commit may repeat generation; exactly-once external calls are not promised.
+
+Export uses jsonl-bundle's gzip writer and includes profile, exact input, request ID and vector. It makes no provider calls and refuses to overwrite archives. Document/chunk mapping remains in DuckDB; this vector export alone is not a complete document archive. Copy the closed DuckDB file for full restoration. Archive import is not yet implemented.
+
+## Cache identity and tables
+
+A profile records provider, model, immutable revision, dimensions, task prefixes and normalization. Request IDs hash profile ID plus exact prefixed input. Application numeric IDs never affect request identity. Identical input is shared across documents; different profiles have separate vector spaces.
+
+- `profiles`: identity and JSON provenance.
+- `documents`: immutable text/title, stable reference and chunker configuration.
+- `chunks`: document ID, ordinal, Unicode start/end offsets, token count, request ID.
+- `requests`: exact provider input, pending/ready/failed status, attempts, error class.
+- `vectors_<profileId>`: fixed-size vectors managed by `survos/ai-duckdb-store`.
+- `provider_calls`: attempted batches and outcomes.
+
+Provider inputs are currently retained alongside document text for self-contained queue replay. Deduplication beyond identical inputs is a later optimization.
+
+One cooperating process owns the file via a sidecar lock. Other importers/consumers fail clearly and can retry. Run import, consume and populate sequentially; this is not a multi-host concurrent-write database. No vector index is created automatically.
+
+Chunking reuses Bookworm's paragraph/token implementation: pinned Nomic WordPiece resources include checksums and their Apache license; OpenAI counting uses yethee/tiktoken. No overlap; exact Unicode offsets. The default Nomic budget of 1,800 tokens includes title and task prefix, within its effective 2,048-token context.
+
+Applications own entity/index projections. Purging application records must not purge this cache. Bill's Baltimore 2024 fixture exercises import → ensure → consume → populate → purge → reimport. Scanstation, KPA and bench can use the same package without bill-specific dependencies.
+
+## Verification
 
 ```bash
 vendor/bin/phpunit --bootstrap vendor/autoload.php tests
 ```
 
-The kernel test verifies bundle registration and compilation without Doctrine or provider credentials.
+Tests cover kernel boot, profile isolation, deduplication, restart persistence, invalid batch atomicity/retry, model digest checks, and paragraph/token boundaries. Bill provides the live Nomic/database reimport proof.

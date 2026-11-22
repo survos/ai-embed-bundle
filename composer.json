@@ -3,25 +3,41 @@
     "description": "Model-aware embedding requests, reusable vector caches and document embedding workflows for Symfony.",
     "type": "symfony-bundle",
     "license": "MIT",
-    "keywords": ["symfony", "embeddings", "vectors", "cache", "duckdb", "jsonl"],
+    "keywords": [
+        "symfony",
+        "embeddings",
+        "vectors",
+        "cache",
+        "duckdb",
+        "jsonl"
+    ],
     "require": {
         "php": "^8.4",
         "survos/kit-bundle": "^2.45",
-        "symfony/http-kernel": "^8.1"
+        "symfony/http-kernel": "^8.1",
+        "survos/ai-duckdb-store": "^2.45",
+        "survos/jsonl-bundle": "^2.45",
+        "symfony/http-client": "^8.1",
+        "symfony/console": "^8.1",
+        "codewithkyrian/tokenizers": "^2.1",
+        "yethee/tiktoken": "^1.1",
+        "ext-mbstring": "*"
     },
     "require-dev": {
         "phpunit/phpunit": "^13.0",
         "symfony/framework-bundle": "^8.1"
     },
     "autoload": {
-        "psr-4": {"Survos\\AiEmbedBundle\\": "src/"}
+        "psr-4": {
+            "Survos\\AiEmbedBundle\\": "src/"
+        }
     },
     "autoload-dev": {
-        "psr-4": {"Survos\\AiEmbedBundle\\Tests\\": "tests/"}
+        "psr-4": {
+            "Survos\\AiEmbedBundle\\Tests\\": "tests/"
+        }
     },
     "suggest": {
-        "survos/jsonl-bundle": "Portable compressed JSONL embedding archives (planned adapter).",
-        "survos/ai-duckdb-store": "DuckDB vector storage and search (planned adapter).",
         "survos/workflow-messenger-bundle": "Entity-independent queued and batched requests (planned integration)."
     }
 }
