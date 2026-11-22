@@ -24,6 +24,12 @@ final class DuckDbEmbeddingCache
         if ($this->db) {
             return $this->db;
         }
+        if (!class_exists(Store::class)) {
+            throw new \LogicException('DuckDB embedding cache requires survos/ai-duckdb-store. Install it with composer require survos/ai-duckdb-store and enable ext-pdo_duckdb.');
+        }
+        if (!class_exists(\PDO::class) || !in_array('duckdb', \PDO::getAvailableDrivers(), true)) {
+            throw new \LogicException('DuckDB embedding cache requires the native PDO DuckDB driver (ext-pdo_duckdb). Enable it in this PHP runtime before using the cache.');
+        }
         if (!is_dir(dirname($this->path))) {
             mkdir(dirname($this->path), 0770, true);
         }
@@ -37,6 +43,10 @@ final class DuckDbEmbeddingCache
             CREATE TABLE IF NOT EXISTS documents (id VARCHAR PRIMARY KEY, reference VARCHAR NOT NULL, profile_id VARCHAR NOT NULL, title VARCHAR NOT NULL, text VARCHAR NOT NULL, chunking JSON NOT NULL);
             CREATE TABLE IF NOT EXISTS chunks (document_id VARCHAR NOT NULL, ordinal INTEGER NOT NULL, char_start INTEGER NOT NULL, char_end INTEGER NOT NULL, tokens INTEGER NOT NULL, request_id VARCHAR NOT NULL, PRIMARY KEY (document_id, ordinal));
             CREATE TABLE IF NOT EXISTS provider_calls (id VARCHAR PRIMARY KEY, profile_id VARCHAR NOT NULL, inputs INTEGER NOT NULL, started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, status VARCHAR NOT NULL)');
+
+        $this->db->exec("ALTER TABLE provider_calls ADD COLUMN IF NOT EXISTS operation VARCHAR DEFAULT 'embedding';
+            CREATE TABLE IF NOT EXISTS embedding_batches (id VARCHAR PRIMARY KEY, profile_id VARCHAR NOT NULL, state VARCHAR NOT NULL, input_path VARCHAR NOT NULL, file_id VARCHAR, remote_id VARCHAR, result_path VARCHAR, remote JSON);
+            CREATE TABLE IF NOT EXISTS embedding_batch_requests (batch_id VARCHAR NOT NULL, request_id VARCHAR NOT NULL, PRIMARY KEY (batch_id, request_id))");
 
         return $this->db;
     }
@@ -88,15 +98,22 @@ final class DuckDbEmbeddingCache
             }
         }
         $db = $this->connection();
-        $db->beginTransaction();
+        $ownsTransaction = !$db->inTransaction();
+        if ($ownsTransaction) {
+            $db->beginTransaction();
+        }
         try {
             foreach ($requests as $i => $request) {
                 $this->store($profile)->add(new VectorDocument($request['id'], new Vector($vectors[$i]), new Metadata(['profileId' => $profile->id()])));
                 $this->execute("UPDATE requests SET status = 'ready', error = NULL WHERE id = ?", [$request['id']]);
             }
-            $db->commit();
+            if ($ownsTransaction) {
+                $db->commit();
+            }
         } catch (\Throwable $e) {
-            $db->rollBack();
+            if ($ownsTransaction) {
+                $db->rollBack();
+            }
             throw $e;
         }
     }

@@ -18,6 +18,11 @@ final readonly class EmbeddingService
     {
     }
 
+    public function forProfile(EmbeddingProfile $profile): self
+    {
+        return new self($this->cache, $profile, $this->provider, $this->chunker);
+    }
+
     public function ensureEmbedding(string $text, string $purpose = 'document'): array
     {
         return $this->cache->ensure($this->profile->input($text, $purpose), $this->profile);
@@ -29,6 +34,9 @@ final readonly class EmbeddingService
             throw new \InvalidArgumentException('Document reference and text must not be empty.');
         }
         $chunking = $this->chunker->profile($this->profile->model, $maxTokens);
+        if ($chunking['tokenizer']['documentPrefix'] !== $this->profile->documentPrefix) {
+            throw new \InvalidArgumentException('Document prefix must match the model-aware tokenizer profile.');
+        }
         $id = hash('sha256', json_encode([$reference, $title, $text, $this->profile->id(), $chunking], JSON_THROW_ON_ERROR));
         $this->cache->register($this->profile);
         // Reimport takes the fast path: no tokenization and no provider access.
@@ -66,7 +74,10 @@ final readonly class EmbeddingService
             throw new \InvalidArgumentException('Expected batch size 1–64 and positive limit.');
         }
         $this->cache->register($this->profile);
-        $requests = $this->cache->execute("SELECT id, input FROM requests WHERE profile_id = ? AND status <> 'ready' ORDER BY id LIMIT ".$limit, [$this->profile->id()])->fetchAll(\PDO::FETCH_ASSOC);
+        $requests = $this->cache->execute("SELECT id, input FROM requests WHERE profile_id = ? AND status IN ('pending', 'failed') ORDER BY id LIMIT ".$limit, [$this->profile->id()])->fetchAll(\PDO::FETCH_ASSOC);
+        if ($requests && 'openai' === $this->profile->provider) {
+            throw new \LogicException('Use ai:embed:batch:submit and ai:embed:batch:collect for OpenAI.');
+        }
         $calls = 0;
         $completed = 0;
         foreach (array_chunk($requests, $batchSize) as $batch) {

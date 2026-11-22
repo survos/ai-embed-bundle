@@ -24,6 +24,10 @@ final class SurvosAiEmbedBundle extends AbstractSurvosBundle
         $definition->rootNode()->children()
             ->booleanNode('enabled')->defaultFalse()->end()
             ->scalarNode('cache_path')->defaultValue('%kernel.project_dir%/var/embeddings/cache.duckdb')->end()
+            ->scalarNode('provider')->defaultValue('ollama')->end()
+            ->scalarNode('document_prefix')->defaultValue('search_document: ')->end()
+            ->scalarNode('query_prefix')->defaultValue('search_query: ')->end()
+            ->scalarNode('api_key')->defaultValue('%env(default::OPENAI_API_KEY)%')->end()
             ->scalarNode('model')->defaultValue('nomic-embed-text:v1.5')->end()
             ->scalarNode('revision')->defaultValue('0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f')->end()
             ->integerNode('dimensions')->min(1)->defaultValue(768)->end()
@@ -39,10 +43,13 @@ final class SurvosAiEmbedBundle extends AbstractSurvosBundle
         }
         $services = $container->services()->defaults()->autowire()->autoconfigure();
         $services->set('ai_embed.http', HttpClientInterface::class)->factory([HttpClient::class, 'create']);
-        $services->set(EmbeddingProfile::class)->args([$config['model'], $config['revision'], $config['dimensions']]);
+        $services->set(EmbeddingProfile::class)->args([$config['model'], $config['revision'], $config['dimensions'], $config['document_prefix'], $config['query_prefix'], $config['provider']]);
         $services->set(DuckDbEmbeddingCache::class)->args([$config['cache_path']]);
         $services->set(OllamaEmbeddingProvider::class)->args([service('ai_embed.http'), $config['url']]);
         $services->alias(EmbeddingProviderInterface::class, OllamaEmbeddingProvider::class);
         $services->set(EmbeddingService::class);
+        $services->set(BatchHttpClient::class)->args([service('ai_embed.http'), service(DuckDbEmbeddingCache::class), service(EmbeddingProfile::class)]);
+        $services->set('ai_embed.batch_client', \Tacman\AiBatch\Service\OpenAiBatchClient::class)->args([service(BatchHttpClient::class), $config['api_key']]);
+        $services->set(OpenAiEmbeddingBatchService::class)->arg('$client', service('ai_embed.batch_client'));
     }
 }
